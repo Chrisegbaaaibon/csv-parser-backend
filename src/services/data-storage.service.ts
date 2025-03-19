@@ -10,20 +10,21 @@ export class DataStorageService {
   constructor(private readonly supabaseConfig: SupabaseConfig) {}
 
   async storeData(data: PropertyUnit[]) {
-    // Create a new client with the service role key
     const adminClient = createClient(
       process.env.SUPABASE_URL || '',
-      process.env.SUPABASE_KEY || '', // Changed to SERVICE_ROLE_KEY
+      process.env.SUPABASE_KEY || '',
     );
 
     const tableName = 'unit';
+    const unitNameColumn = this.sanitizeColumnName('Unit Name');
 
     try {
-      // 1️⃣ Create the table directly with SQL
       const { error: tableError } = await adminClient.rpc('execute_sql', {
         sql: `CREATE TABLE IF NOT EXISTS ${tableName} (
-          id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-          created_at TIMESTAMP WITH TIME ZONE DEFAULT now()
+          id UUID DEFAULT gen_random_uuid(),
+          created_at TIMESTAMP WITH TIME ZONE DEFAULT now(),
+          ${unitNameColumn} TEXT,
+          PRIMARY KEY (id)
         )`,
       });
 
@@ -32,7 +33,43 @@ export class DataStorageService {
         throw new Error(`Failed to create table: ${tableError.message}`);
       }
 
-      // 2️⃣ Fetch existing column names with SQL query
+      const { error: constraintError } = await adminClient.rpc('execute_sql', {
+        sql: `
+          DO $$ 
+          BEGIN
+            IF NOT EXISTS (
+              SELECT 1 FROM information_schema.columns 
+              WHERE table_name = '${tableName}'
+              AND column_name = '${unitNameColumn}'
+            ) THEN
+              ALTER TABLE ${tableName} ADD COLUMN ${unitNameColumn} TEXT;
+            END IF;
+          END $$;
+          
+          DO $$
+          BEGIN
+            IF NOT EXISTS (
+              SELECT 1 FROM pg_constraint
+              WHERE conname = '${tableName}_${unitNameColumn}_key'
+              AND contype = 'u'
+            ) THEN
+              ALTER TABLE ${tableName} ADD CONSTRAINT ${tableName}_${unitNameColumn}_key UNIQUE (${unitNameColumn});
+            END IF;
+          END $$;
+        `,
+      });
+
+      if (constraintError) {
+        this.logger.error(
+          `Failed to add unique constraint: ${constraintError.message}`,
+        );
+        throw new Error(
+          `Failed to add unique constraint: ${constraintError.message}`,
+        );
+      }
+
+      this.logger.log(`Ensured unique constraint on ${unitNameColumn}`);
+
       const { data: tableInfo, error: fetchError } = await adminClient.rpc(
         'execute_sql',
         {
@@ -47,12 +84,10 @@ export class DataStorageService {
         throw new Error(`Failed to fetch table schema: ${fetchError.message}`);
       }
 
-      // Parse the column names from the result
       const existingColumnNames = tableInfo
         ? tableInfo.map((row) => row[0])
         : [];
 
-      // 3️⃣ Process data to sanitize column names for SQL
       const processedData = data.map((row) => {
         const newRow = {};
         Object.keys(row).forEach((key) => {
@@ -62,21 +97,16 @@ export class DataStorageService {
         return newRow;
       });
 
-      // 4️⃣ Get column names from sanitized CSV data
       const csvColumnNames = Object.keys(processedData[0]);
 
-      // 5️⃣ Create missing columns with direct SQL - ALWAYS USE TEXT TYPE TO AVOID CONVERSION ERRORS
       for (const column of csvColumnNames) {
-        // Skip columns that already exist
         if (existingColumnNames.includes(column)) {
           continue;
         }
 
-        // Now we're using TEXT for all columns to be safe
-        const columnType = 'TEXT'; // Use TEXT for all columns to avoid type conversion errors
+        const columnType = 'TEXT';
         this.logger.log(`Adding column '${column}' with type TEXT`);
 
-        // Execute alter table SQL directly
         const { error } = await adminClient.rpc('execute_sql', {
           sql: `ALTER TABLE ${tableName} ADD COLUMN IF NOT EXISTS "${column}" ${columnType}`,
         });
@@ -86,11 +116,9 @@ export class DataStorageService {
         }
       }
 
-      // 6️⃣ Convert all values to strings to ensure they can be inserted
       const safeData = processedData.map((row) => {
         const safeRow = {};
         Object.keys(row).forEach((key) => {
-          // Convert all values to strings to avoid type issues
           safeRow[key] =
             row[key] !== null && row[key] !== undefined
               ? String(row[key])
@@ -99,14 +127,18 @@ export class DataStorageService {
         return safeRow;
       });
 
-      // 7️⃣ Insert processed data in batches
       const batchSize = 100;
       for (let i = 0; i < safeData.length; i += batchSize) {
         const batch = safeData.slice(i, i + batchSize);
-        const { error } = await adminClient.from(tableName).insert(batch);
+
+        const { error } = await adminClient.from(tableName).upsert(batch, {
+          onConflict: unitNameColumn,
+          ignoreDuplicates: false,
+        });
+
         if (error) {
-          this.logger.error(`Batch insert failed: ${error.message}`);
-          throw new Error(`Database insert failed: ${error.message}`);
+          this.logger.error(`Batch upsert failed: ${error.message}`);
+          throw new Error(`Database upsert failed: ${error.message}`);
         }
       }
 
@@ -118,39 +150,9 @@ export class DataStorageService {
   }
 
   private sanitizeColumnName(column: string): string {
-    // Replace spaces and special characters with underscores
     return column
       .replace(/\W+/g, '_')
       .replace(/^_+|_+$/g, '')
       .toLowerCase();
-  }
-
-  // This method is no longer used since we're using TEXT for all columns
-  private determineColumnType(data: any[], column: string): string {
-    // Check more values (up to 100) to better determine type
-    const samples = data
-      .filter((row) => row[column] !== null && row[column] !== undefined)
-      .slice(0, 100);
-
-    if (samples.length === 0) return 'TEXT';
-
-    // Check if ALL values are numeric
-    const allNumbers = samples.every((row) => {
-      const val = row[column];
-
-      if (typeof val === 'number') return true;
-
-      if (typeof val !== 'string') return false;
-
-      // Make sure the entire string is a valid number
-      const trimmed = val.trim();
-      return (
-        trimmed !== '' &&
-        !isNaN(Number(trimmed)) &&
-        /^-?\d+(\.\d+)?$/.test(trimmed)
-      );
-    });
-
-    return allNumbers ? 'NUMERIC' : 'TEXT';
   }
 }
