@@ -4,6 +4,9 @@ import {
   UploadedFile,
   UseInterceptors,
   BadRequestException,
+  Put,
+  Body,
+  Param,
 } from '@nestjs/common';
 import { FileInterceptor } from '../common/file.interceptor';
 import { parseFile } from '../utils/csv-parser';
@@ -28,12 +31,24 @@ export class UploadController {
       throw new BadRequestException('No file uploaded');
     }
 
-    const filePath = await this.fileStorageService.uploadFile(file);
-    const parsedData = await parseFile(file);
+    const [filePath, parsedData] = await Promise.all([
+      this.fileStorageService.uploadFile(file),
+      parseFile(file),
+    ]);
 
-    await this.dataStorageService.storeData(parsedData.data);
-    await this.searchService.indexData(parsedData.data);
+    await Promise.all([this.dataStorageService.storeData(parsedData.data)]);
+    const response = this.searchService.indexData(parsedData.data);
+    console.log(parsedData.data.length);
 
-    return { message: 'File uploaded & data stored', filePath };
+    return {
+      response: response,
+    };
+  }
+
+  @Put('/:id')
+  async editData(@Param('id') id: string, @Body() data: any) {
+    await this.dataStorageService.editData(id, data);
+
+    return { message: 'Data edited successfully' };
   }
 }

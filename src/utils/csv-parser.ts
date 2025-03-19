@@ -42,11 +42,23 @@ export async function parseCSV(csvString: string): Promise<ParseResult> {
     });
 
     // Extract headers from the first row
-    const headers = rows[0].split(bestDelimiter).map((h) => {
+    let headers = rows[0].split(bestDelimiter).map((h) => {
       // Clean up headers - trim and handle quoted values
-      const cleaned = h.trim().replace(/^["'](.+)["']$/, '$1');
-      return cleaned || `Column${Math.random().toString(36).substring(2, 7)}`;
+      return h.trim().replace(/^["'](.+)["']$/, '$1');
     });
+
+    // Track the indexes of valid headers
+    const validHeaderIndexes = headers
+      .map((header, index) => {
+        // Check if header is empty or auto-generated
+        return header && !header.startsWith('Column') ? index : -1;
+      })
+      .filter((index) => index !== -1);
+
+    // Filter out empty or auto-generated headers
+    headers = headers.filter(
+      (header) => header && !header.startsWith('Column'),
+    );
 
     // Parse the data rows
     const data: PropertyUnit[] = [];
@@ -56,32 +68,28 @@ export async function parseCSV(csvString: string): Promise<ParseResult> {
       if (!row) continue; // Skip empty rows
 
       const values = row.split(bestDelimiter);
-
-      // Skip rows that have any empty values
-      const hasEmptyValues = values.some((val, idx) => {
-        // Only check emptiness for columns that have headers
-        if (idx >= headers.length) return false;
-        return val.trim() === '';
-      });
-
-      if (hasEmptyValues) {
-        continue;
-      }
-
       const item: PropertyUnit = {};
 
-      headers.forEach((header, index) => {
-        let value = index < values.length ? values[index].trim() : '';
+      // Only process valid headers
+      headers.forEach((header, headerIndex) => {
+        // Get the original index from the source file
+        const originalIndex = validHeaderIndexes[headerIndex];
+        let value =
+          originalIndex < values.length ? values[originalIndex].trim() : '';
 
         // Remove quotes if present
         value = value.replace(/^["'](.+)["']$/, '$1');
 
-        // Store the value as-is, without transformation
-        item[header] = value;
+        // Only add non-empty values
+        if (value !== '') {
+          item[header] = value;
+        }
       });
 
-      // Add the row data
-      data.push(item);
+      // Only add rows that have at least one value
+      if (Object.keys(item).length > 0) {
+        data.push(item);
+      }
     }
 
     // Detect field types
@@ -146,7 +154,6 @@ export async function parseExcel(
 
       // Get the first sheet
       const firstSheetName = workbook.SheetNames[0];
-
       const worksheet = workbook.Sheets[firstSheetName];
 
       // First try with raw mode to preserve all data types
@@ -175,11 +182,17 @@ export async function parseExcel(
 
       // Extract header names from the header row
       const headerRow = rawJson[headerRowIndex] as any[];
-      const headers = headerRow.map((header, idx) => {
-        if (header === null || header === undefined || header === '') {
-          return `Column_${idx + 1}`;
+
+      // Track valid header indexes and names
+      const validHeaders: string[] = [];
+      const validHeaderIndexes: number[] = [];
+
+      headerRow.forEach((header, idx) => {
+        // Only include headers that have actual names (not auto-generated or empty)
+        if (header !== null && header !== undefined && header !== '') {
+          validHeaders.push(String(header).trim());
+          validHeaderIndexes.push(idx);
         }
-        return String(header).trim();
       });
 
       // Convert all data rows
@@ -196,40 +209,31 @@ export async function parseExcel(
         const item: PropertyUnit = {};
         let emptyCount = 0;
 
-        // Map values using header names
-        headers.forEach((header, idx) => {
-          if (idx < row.length) {
-            const value = row[idx];
+        // Map values using only valid headers
+        validHeaders.forEach((header, idx) => {
+          const originalIndex = validHeaderIndexes[idx];
+
+          if (originalIndex < row.length) {
+            const value = row[originalIndex];
 
             // Count empty fields
             if (value === null || value === undefined || value === '') {
               emptyCount++;
+            } else {
+              item[header] = value;
             }
-
-            item[header] = value;
-          } else {
-            item[header] = '';
-            emptyCount++;
           }
         });
 
         // Skip rows where more than 50% of fields are empty (more lenient approach)
-        if (emptyCount > headers.length * 0.5) {
+        if (emptyCount > validHeaders.length * 0.5) {
           continue;
         }
 
-        parsedData.push(item);
-      }
-
-      // Log the first row to verify field count
-      if (parsedData.length > 0) {
-        console.log(
-          'First parsed Excel row fields:',
-          Object.keys(parsedData[0]).join(', '),
-        );
-        console.log(
-          `Excel row has ${Object.keys(parsedData[0]).length} fields`,
-        );
+        // Only add rows that have at least one value
+        if (Object.keys(item).length > 0) {
+          parsedData.push(item);
+        }
       }
 
       // Detect field types
@@ -238,7 +242,7 @@ export async function parseExcel(
         { type: string; label: string; example: any }
       > = {};
 
-      headers.forEach((header) => {
+      validHeaders.forEach((header) => {
         let example: null | string | number | any = null;
         let type = 'string';
 
@@ -261,7 +265,6 @@ export async function parseExcel(
 
         // Generate a readable label
         const label = header
-          .replace(/^Column_/, 'Column ')
           .split(/[_\s]/)
           .map(
             (word) =>
@@ -278,7 +281,7 @@ export async function parseExcel(
 
       resolve({
         data: parsedData,
-        fields: headers,
+        fields: validHeaders,
         detectedFields,
       });
     } catch (error) {
@@ -291,7 +294,6 @@ export async function parseExcel(
     }
   });
 }
-
 // Add this function to your file
 
 export function mergeUnitsByName(data: PropertyUnit[]): PropertyUnit[] {
