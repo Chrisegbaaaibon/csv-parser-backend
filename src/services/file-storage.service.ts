@@ -1,11 +1,15 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { SupabaseConfig } from '../config/supabase.config';
 
 @Injectable()
 export class FileStorageService {
-  constructor(private readonly supabaseConfig: SupabaseConfig) {}
+  constructor(
+    private readonly supabaseConfig: SupabaseConfig,
+    private readonly logger: Logger,
+  ) {}
 
   async uploadFile(file: Express.Multer.File): Promise<string> {
+    const startTime = Date.now();
     const supabase = this.supabaseConfig.getClient();
     const filePath = `uploads/${Date.now()}_${file.originalname}`;
 
@@ -18,6 +22,10 @@ export class FileStorageService {
     if (error) {
       throw new Error(`File upload failed: ${error.message}`);
     }
+
+    const duration = Date.now() - startTime;
+
+    this.logger.log(`File uploaded to ${filePath} in ${duration}ms`);
 
     return filePath;
   }

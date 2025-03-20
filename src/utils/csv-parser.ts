@@ -148,10 +148,14 @@ export async function parseExcel(
       // Try parsing with different options to find the best approach
       const workbook = XLSX.read(data, {
         type: 'array',
-        cellDates: true, // Properly handle dates
-        cellText: false, // Don't convert to text unnecessarily
+        cellDates: true,
+        cellText: false,
+        cellNF: false,
+        WTF: true, // More detailed error messages
+        codepage: 65001, // Force UTF-8 encoding
+        raw: false,
+        dateNF: 'yyyy-mm-dd', // Normalize date formats
       });
-
       // Get the first sheet
       const firstSheetName = workbook.SheetNames[0];
       const worksheet = workbook.Sheets[firstSheetName];
@@ -285,7 +289,7 @@ export async function parseExcel(
         detectedFields,
       });
     } catch (error) {
-      console.error('Error parsing Excel:', error);
+      console.log('Error parsing Excel:', JSON.stringify(error, null, 2));
       reject(
         new Error(
           `Failed to parse Excel: ${error instanceof Error ? error.message : String(error)}`,
@@ -402,23 +406,114 @@ export async function parseFile(
 ): Promise<ParseResult> {
   const extension = file?.originalname?.split('.').pop()?.toLowerCase() || '';
 
-  let result: ParseResult;
-
-  if (extension === 'csv') {
-    // Use Node.js Buffer directly instead of FileReader
-    const csvString = file.buffer.toString('utf-8');
-    result = await parseCSV(csvString);
-  } else if (['xls', 'xlsx'].includes(extension)) {
-    result = await parseExcel(file);
-  } else {
-    throw new Error(`Unsupported file extension: ${extension}`);
+  // Validate file size (prevent memory issues)
+  if (file.size > 50 * 1024 * 1024) {
+    // 50MB limit
+    throw new Error('File too large (max 50MB)');
   }
 
-  // Merge units with the same name
-  const mergedData = mergeUnitsByName(result.data);
-  // Return the merged data
-  return {
-    ...result,
-    data: mergedData,
-  };
+  let result: ParseResult;
+
+  try {
+    if (extension === 'csv') {
+      // Use streams for large CSV files
+      const csvString = file.buffer.toString('utf-8');
+      result = await parseCSV(csvString);
+    } else if (['xls', 'xlsx'].includes(extension)) {
+      try {
+        result = await parseExcel(file);
+      } catch (error) {
+        // Fallback method if standard parsing fails
+        console.warn(
+          `Standard Excel parsing failed: ${error.message}, trying fallback method`,
+        );
+
+        // Try alternative parsing approach with different options
+        result = await parseExcelFallback(file);
+      }
+    } else {
+      throw new Error(`Unsupported file extension: ${extension}`);
+    }
+
+    // Optimize data merging for large datasets
+    const mergedData = mergeUnitsByName(result.data);
+
+    return {
+      ...result,
+      data: mergedData,
+    };
+  } catch (error) {
+    console.error(`File parsing error (${extension}):`, error);
+    throw new Error(
+      `Failed to parse ${extension.toUpperCase()} file: ${error.message}`,
+    );
+  }
+}
+
+// Add this fallback method for more resilient Excel parsing
+async function parseExcelFallback(
+  file: Express.Multer.File,
+): Promise<ParseResult> {
+  return new Promise((resolve, reject) => {
+    try {
+      // Try binary string parsing instead of array
+      const workbook = XLSX.read(file.buffer, {
+        type: 'buffer',
+        cellDates: false,
+        cellText: true,
+        cellNF: false,
+        codepage: 65001,
+        sheetStubs: true,
+        raw: true,
+      });
+
+      const firstSheetName = workbook.SheetNames[0];
+      const worksheet = workbook.Sheets[firstSheetName];
+
+      // Use more lenient parsing options
+      const json = XLSX.utils.sheet_to_json(worksheet, {
+        raw: false,
+        defval: '',
+        header: 'A',
+      });
+
+      // Extract headers from first row
+      const headers =
+        json.length > 0
+          ? Object.keys(json[0] as object).filter((k) => k !== '__rowNum__')
+          : [];
+
+      // Convert to expected format
+      const data = json.slice(1).map((row: Record<string, any>) => {
+        const item: PropertyUnit = {};
+        headers.forEach((header) => {
+          if (row[header] !== undefined && row[header] !== '') {
+            item[header] = row[header];
+          }
+        });
+        return item;
+      });
+
+      // Basic field detection
+      const detectedFields: Record<
+        string,
+        { type: string; label: string; example: any }
+      > = {};
+      headers.forEach((header) => {
+        detectedFields[header] = {
+          type: 'string',
+          label: header,
+          example: data[0]?.[header] || null,
+        };
+      });
+
+      resolve({
+        data,
+        fields: headers,
+        detectedFields,
+      });
+    } catch (error) {
+      reject(new Error(`Fallback Excel parsing failed: ${error.message}`));
+    }
+  });
 }

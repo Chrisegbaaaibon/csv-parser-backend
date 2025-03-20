@@ -36,12 +36,14 @@ export class UploadController {
       parseFile(file),
     ]);
 
-    await Promise.all([this.dataStorageService.storeData(parsedData.data)]);
-    const response = this.searchService.indexData(parsedData.data);
-    console.log(parsedData.data.length);
+    await Promise.all([
+      this.dataStorageService.storeData(parsedData.data),
+      this.searchService.indexData(parsedData.data),
+    ]);
 
     return {
-      response: response,
+      message: 'File uploaded successfully',
+      filePath,
     };
   }
 

@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import { Logger, Module } from '@nestjs/common';
 import { UploadController } from '../controllers/upload.controller';
 import { FileStorageService } from '../services/file-storage.service';
 import { DataStorageService } from '../services/data-storage.service';
@@ -14,6 +14,7 @@ import { TypeSenseConfig } from 'src/config/typesense.config';
     SearchService,
     SupabaseConfig,
     TypeSenseConfig,
+    Logger,
   ],
 })
 export class UploadModule {}
